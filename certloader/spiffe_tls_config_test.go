@@ -2,8 +2,10 @@ package certloader
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log"
@@ -11,8 +13,46 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spiffe/go-spiffe/spiffetest"
+	"github.com/ghostunnel/ghostunnel/internal/test/fakeworkloadapi"
+	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
+	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	"github.com/stretchr/testify/require"
+)
+
+const (
+	certChainRaw = `-----BEGIN CERTIFICATE-----
+MIIB5zCCAYygAwIBAgIQGjHQHLTM8aoeGvrBhXqQgjAKBggqhkjOPQQDAjAeMQsw
+CQYDVQQGEwJVUzEPMA0GA1UEChMGU1BJRkZFMCAXDTIyMDUyNzE4MzgwMloYDzIw
+NTIwNTE5MTgzODEyWjAdMQswCQYDVQQGEwJVUzEOMAwGA1UEChMFU1BJUkUwWTAT
+BgcqhkjOPQIBBggqhkjOPQMBBwNCAASFLghK0IMR1qdQr/GF+T1dnfeuYnb5/+zx
+G77odmfY7S/7SPNvoG906vjOYGBJrJJuOkdI/s9Tazln11bli8Pno4GqMIGnMA4G
+A1UdDwEB/wQEAwIDqDAdBgNVHSUEFjAUBggrBgEFBQcDAQYIKwYBBQUHAwIwDAYD
+VR0TAQH/BAIwADAdBgNVHQ4EFgQUT5j7MaOFshqEjOKvzOgVhFLPkE0wHwYDVR0j
+BBgwFoAUawIr9E/NdLoJVMfRTbROAAvSHjAwKAYDVR0RBCEwH4Ydc3BpZmZlOi8v
+ZXhhbXBsZS5vcmcvd29ya2xvYWQwCgYIKoZIzj0EAwIDSQAwRgIhAOpaSfdMZx8U
+h/2mDKVICGfdRy8pr3bxiqzOxnvuhMMzAiEAnISeym9T4uV/+yKDmoOJO8WR+zbX
+tHV0AmpE63ZCkH4=
+-----END CERTIFICATE-----
+`
+	keyRaw = `-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgznpYKAZr5mnIatm6
+CcLqgOcljX4ciZvufZJBmhWYHHShRANCAASFLghK0IMR1qdQr/GF+T1dnfeuYnb5
+/+zxG77odmfY7S/7SPNvoG906vjOYGBJrJJuOkdI/s9Tazln11bli8Pn
+-----END PRIVATE KEY-----
+`
+	bundleRaw = `-----BEGIN CERTIFICATE-----
+MIIBnzCCAUWgAwIBAgIQFvTPGgjq5NPXMth/8zfMUzAKBggqhkjOPQQDAjAeMQsw
+CQYDVQQGEwJVUzEPMA0GA1UEChMGU1BJRkZFMCAXDTIyMDUyNzE4MzYyMFoYDzIy
+MDIwNDE0MTgzNjMwWjAeMQswCQYDVQQGEwJVUzEPMA0GA1UEChMGU1BJRkZFMFkw
+EwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEp3YQ3WfOcVjKassBZedBJL4MqhXqFS3A
+FjHpEB8RuowyQGCgwl71pockqvQ8wFTqtwIELI7Xcf1m1i45OfkrKKNjMGEwDgYD
+VR0PAQH/BAQDAgEGMA8GA1UdEwEB/wQFMAMBAf8wHQYDVR0OBBYEFGsCK/RPzXS6
+CVTH0U20TgAL0h4wMB8GA1UdEQQYMBaGFHNwaWZmZTovL2V4YW1wbGUub3JnMAoG
+CCqGSM49BAMCA0gAMEUCIQCNUWo9F1b7om4g4uQ3kqhFgFrQ6813JNcIYNC2Pqhf
+KgIgP76bHbzhPYR1i8a4hqOI8Y9jk/dxGhNpiq13wSODFDI=
+-----END CERTIFICATE-----
+`
 )
 
 func TestSPIFFELogger(t *testing.T) {
@@ -24,20 +64,32 @@ func TestSPIFFELogger(t *testing.T) {
 }
 
 func TestWorkloadAPITLSConfigSource(t *testing.T) {
-	ca := spiffetest.NewCA(t)
+	td := spiffeid.RequireTrustDomainFromString("example.org")
+	id := spiffeid.RequireFromPath(td, "/workload")
 
-	cert, key := ca.CreateX509SVID("spiffe://domain.test/workload")
+	certificates, err := loadCertificates(certChainRaw)
+	require.NoError(t, err)
 
-	workloadAPI := spiffetest.NewWorkloadAPI(t, &spiffetest.X509SVIDResponse{
-		Bundle: ca.Roots(),
-		SVIDs: []spiffetest.X509SVID{
-			{
-				CertChain: cert,
-				Key:       key,
-			},
-		},
-	})
+	key, err := loadKey(keyRaw)
+	require.NoError(t, err)
+
+	bundles, err := loadCertificates(bundleRaw)
+	require.NoError(t, err)
+
+	x509SVID := &x509svid.SVID{
+		ID:           id,
+		Certificates: certificates,
+		PrivateKey:   key,
+	}
+	x509Bundle := x509bundle.FromX509Authorities(td, bundles)
+
+	workloadAPI := fakeworkloadapi.New(t)
 	defer workloadAPI.Stop()
+
+	workloadAPI.SetX509SVIDResponse(&fakeworkloadapi.X509SVIDResponse{
+		SVIDs:  []*x509svid.SVID{x509SVID},
+		Bundle: x509Bundle,
+	})
 
 	log := log.Default()
 
@@ -108,4 +160,35 @@ func countVerifyPeerCertificate(callCount *int32) func(rawCerts [][]byte, verifi
 		atomic.AddInt32(callCount, 1)
 		return nil
 	}
+}
+
+func loadCertificates(raw string) ([]*x509.Certificate, error) {
+	certBlock, err := loadPem(raw)
+	if err != nil {
+		return nil, err
+	}
+	return x509.ParseCertificates(certBlock.Bytes)
+}
+
+func loadKey(raw string) (crypto.Signer, error) {
+	keyBlock, err := loadPem(raw)
+	if err != nil {
+		return nil, err
+	}
+
+	key, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
+	if err != nil {
+		return nil, err
+	}
+
+	return key.(crypto.Signer), nil
+}
+
+func loadPem(raw string) (*pem.Block, error) {
+	block, rest := pem.Decode([]byte(raw))
+	if len(rest) > 0 {
+		return nil, errors.New("failed to load pem")
+	}
+
+	return block, nil
 }
